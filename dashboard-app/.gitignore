@@ -24,6 +24,9 @@
 .DS_Store
 *.pem
 
+# legacy sqlite dev data (pre-Postgres)
+/data
+
 # debug
 npm-debug.log*
 yarn-debug.log*
@@ -33,9 +36,6 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 !.env.example
-
-# local sqlite database
-/data
 
 # vercel
 .vercel

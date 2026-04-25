@@ -107,7 +107,8 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
               fontSize={11}
             />
             <YAxis
-              domain={[400, (dataMax: number) => Math.max(dataMax + 50, 1500)]}
+              domain={[400, 2000]}
+              allowDataOverflow
               stroke="currentColor"
               strokeOpacity={0.4}
               fontSize={11}

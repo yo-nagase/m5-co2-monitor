@@ -6,7 +6,7 @@ static const int GRAPH_Y = 60;
 static const int GRAPH_W = 260;
 static const int GRAPH_H = 140;
 static const int CO2_MIN = 400;
-static const int CO2_MAX = 1500;
+static const int CO2_MAX = 2000;
 
 static void drawGraph() {
   // 軸
@@ -17,7 +17,7 @@ static void drawGraph() {
   canvas.setFont(&fonts::Font2);
   canvas.setTextSize(1);
   canvas.setTextColor(TFT_LIGHTGRAY);
-  int levels[] = {400, 600, 800, 1000, 1200, 1500};
+  int levels[] = {400, 600, 800, 1000, 1200, 1500, 2000};
   for (int lv : levels) {
     int yPos = GRAPH_Y + GRAPH_H - (int)((float)(lv - CO2_MIN) / (CO2_MAX - CO2_MIN) * GRAPH_H);
     canvas.drawFastHLine(GRAPH_X - 3, yPos, GRAPH_W + 3,

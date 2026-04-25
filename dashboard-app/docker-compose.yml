@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: m5postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tamanegi
+      POSTGRES_PASSWORD: tamanegi
+      POSTGRES_DB: tamanegi
+    ports:
+      - "5411:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tamanegi -d tamanegi"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:

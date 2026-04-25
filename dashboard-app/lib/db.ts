@@ -1,32 +1,20 @@
 import { PrismaClient, Prisma } from "@prisma/client";
-import { PrismaLibSql } from "@prisma/adapter-libsql";
+import { PrismaPg } from "@prisma/adapter-pg";
 
 const globalForPrisma = globalThis as unknown as {
   prisma?: PrismaClient;
-  prismaInitialized?: boolean;
 };
 
 function makeClient(): PrismaClient {
-  const url = process.env.DATABASE_URL;
-  if (!url) {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
     throw new Error("DATABASE_URL is not set");
   }
-  const adapter = new PrismaLibSql({ url });
-  const client = new PrismaClient({ adapter });
-  return client;
+  const adapter = new PrismaPg({ connectionString });
+  return new PrismaClient({ adapter });
 }
 
 export const prisma = globalForPrisma.prisma ?? makeClient();
-
-if (!globalForPrisma.prismaInitialized) {
-  // Fire-and-forget PRAGMAs. Ignore errors to avoid blocking route init.
-  void Promise.all([
-    prisma.$executeRawUnsafe("PRAGMA journal_mode = WAL"),
-    prisma.$executeRawUnsafe("PRAGMA synchronous = NORMAL"),
-    prisma.$executeRawUnsafe("PRAGMA busy_timeout = 5000"),
-  ]).catch((err) => console.error("[db] PRAGMA setup failed:", err));
-  globalForPrisma.prismaInitialized = true;
-}
 
 if (process.env.NODE_ENV !== "production") {
   globalForPrisma.prisma = prisma;
