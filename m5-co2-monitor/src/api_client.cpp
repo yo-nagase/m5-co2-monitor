@@ -84,7 +84,7 @@ static bool sendOne(const Sample& s) {
   http.addHeader("Content-Type", "application/json");
   http.addHeader("X-API-Key", API_KEY);
 
-  StaticJsonDocument<192> doc;
+  JsonDocument doc;
   doc["device_id"] = deviceId;
   doc["ppm"] = s.ppm;
   uint32_t msAgo = millis() - s.sampleMs;
@@ -98,6 +98,7 @@ static bool sendOne(const Sample& s) {
   http.end();
 
   if (code >= 200 && code < 300) {
+    Serial.printf("[api] POST ok ppm=%d q=%d\n", s.ppm, count);
     return true;
   }
   Serial.printf("[api] POST failed code=%d ppm=%d q=%d\n", code, s.ppm, count);
