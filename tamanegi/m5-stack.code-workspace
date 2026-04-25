@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../../../git-repo/m5-stack"
+		},
+		{
+			"name": "tamanegi",
+			"path": "."
+		}
+	],
+	"settings": {}
+}
