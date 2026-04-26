@@ -34,22 +34,36 @@ export type AggregatePoint = {
   ppm_max: number;
 };
 
-export async function writeReading(
+export async function writeReadings(
   deviceId: string,
-  ppm: number,
-  recordedAtMs: number,
+  samples: Array<{ ppm: number; recordedAtMs: number }>,
   fw: string | null
 ): Promise<void> {
-  const recordedAt = new Date(recordedAtMs);
-  const lastSeenAt = BigInt(recordedAtMs);
+  if (samples.length === 0) return;
+  // Pick the latest sample (max recordedAtMs) for the device cache row.
+  const latest = samples.reduce((acc, s) =>
+    s.recordedAtMs > acc.recordedAtMs ? s : acc
+  );
   await prisma.$transaction([
-    prisma.reading.create({
-      data: { deviceId, ppm, recordedAt, fw },
+    prisma.reading.createMany({
+      data: samples.map((s) => ({
+        deviceId,
+        ppm: s.ppm,
+        recordedAt: new Date(s.recordedAtMs),
+        fw,
+      })),
     }),
     prisma.device.upsert({
       where: { deviceId },
-      create: { deviceId, lastSeenAt, lastPpm: ppm },
-      update: { lastSeenAt, lastPpm: ppm },
+      create: {
+        deviceId,
+        lastSeenAt: BigInt(latest.recordedAtMs),
+        lastPpm: latest.ppm,
+      },
+      update: {
+        lastSeenAt: BigInt(latest.recordedAtMs),
+        lastPpm: latest.ppm,
+      },
     }),
   ]);
 }

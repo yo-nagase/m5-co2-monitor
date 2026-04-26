@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { checkApiKey } from "@/lib/auth";
-import { writeReading } from "@/lib/db";
+import { writeReadings } from "@/lib/db";
 import { evaluateAlert } from "@/lib/alerts";
 import { IngestBody } from "@/lib/schemas";
 
@@ -27,18 +27,32 @@ export async function POST(req: Request) {
     );
   }
 
-  const { device_id, ppm, ms_ago, fw } = parsed.data;
+  const { device_id, fw, samples } = parsed.data;
   const now = Date.now();
-  const recordedAt = now - ms_ago;
+  const expanded = samples.map((s) => ({
+    ppm: s.ppm,
+    recordedAtMs: now - s.ms_ago,
+  }));
 
   try {
-    await writeReading(device_id, ppm, recordedAt, fw ?? null);
+    await writeReadings(device_id, expanded, fw ?? null);
+    const tail = expanded.length > 1 ? ` (+${expanded.length - 1} more)` : "";
+    const latest = expanded.reduce((acc, s) =>
+      s.recordedAtMs > acc.recordedAtMs ? s : acc
+    );
+    console.log(
+      `[ingest] ${device_id} n=${expanded.length} latest_ppm=${latest.ppm} latest_recorded=${new Date(latest.recordedAtMs).toISOString()}${tail}`
+    );
   } catch (err) {
     console.error("[ingest] db write failed:", err);
     return NextResponse.json({ error: "db write failed" }, { status: 500 });
   }
 
-  evaluateAlert(device_id, ppm, now).catch((err) =>
+  // Alert evaluation only on the freshest sample of the batch.
+  const latestPpm = expanded.reduce((acc, s) =>
+    s.recordedAtMs > acc.recordedAtMs ? s : acc
+  ).ppm;
+  evaluateAlert(device_id, latestPpm, now).catch((err) =>
     console.error("[ingest] alert eval failed:", err)
   );
 
