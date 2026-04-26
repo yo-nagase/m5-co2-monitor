@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 
@@ -61,10 +62,11 @@ void apiClientPushSample(int ppm, uint32_t sampleMs) {
 
 // Send up to n samples in one POST. samples[0] is the newest.
 static bool sendBatch(const Sample* samples, int n) {
-  WiFiClient client;
+  WiFiClientSecure client;
+  client.setInsecure();
   HTTPClient http;
-  http.setConnectTimeout(500);
-  http.setTimeout(3000);
+  http.setConnectTimeout(5000);
+  http.setTimeout(8000);
 
   String url = String(API_BASE_URL) + "/api/ingest";
   if (!http.begin(client, url)) {
