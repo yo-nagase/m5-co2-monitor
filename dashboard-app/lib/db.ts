@@ -40,15 +40,16 @@ export async function writeReading(
   recordedAtMs: number,
   fw: string | null
 ): Promise<void> {
-  const recordedAt = BigInt(recordedAtMs);
+  const recordedAt = new Date(recordedAtMs);
+  const lastSeenAt = BigInt(recordedAtMs);
   await prisma.$transaction([
     prisma.reading.create({
       data: { deviceId, ppm, recordedAt, fw },
     }),
     prisma.device.upsert({
       where: { deviceId },
-      create: { deviceId, lastSeenAt: recordedAt, lastPpm: ppm },
-      update: { lastSeenAt: recordedAt, lastPpm: ppm },
+      create: { deviceId, lastSeenAt, lastPpm: ppm },
+      update: { lastSeenAt, lastPpm: ppm },
     }),
   ]);
 }
@@ -70,13 +71,14 @@ export async function aggregateReadings(
   bucketMs: number,
   sinceMs: number
 ): Promise<AggregatePoint[]> {
-  // Bind numeric params as BigInt so SQLite does integer math (not REAL).
   const bucket = BigInt(bucketMs);
-  const since = BigInt(sinceMs);
+  const since = new Date(sinceMs);
+  // Bucket timestamptz to ms-aligned epochs:
+  //   floor(epoch_ms / bucket) * bucket → start-of-bucket in ms
   const rows = await prisma.$queryRaw<
     Array<{ t: bigint; ppm_avg: number; ppm_min: number; ppm_max: number }>
   >(Prisma.sql`
-    SELECT (recorded_at - (recorded_at % ${bucket})) AS t,
+    SELECT (FLOOR(EXTRACT(EPOCH FROM recorded_at) * 1000 / ${bucket})::BIGINT * ${bucket}) AS t,
            CAST(AVG(ppm) AS INTEGER) AS ppm_avg,
            MIN(ppm) AS ppm_min,
            MAX(ppm) AS ppm_max

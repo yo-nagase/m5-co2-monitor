@@ -3,7 +3,7 @@ CREATE TABLE "readings" (
     "id" SERIAL NOT NULL,
     "device_id" TEXT NOT NULL,
     "ppm" INTEGER NOT NULL,
-    "recorded_at" BIGINT NOT NULL,
+    "recorded_at" TIMESTAMPTZ NOT NULL,
     "fw" TEXT,
 
     CONSTRAINT "readings_pkey" PRIMARY KEY ("id")

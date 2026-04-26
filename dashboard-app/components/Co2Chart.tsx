@@ -144,7 +144,7 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
               type="monotone"
               dataKey="ppm_min"
               stroke="none"
-              fill="#0b0f19"
+              fill="#10b981"
               fillOpacity={0}
               isAnimationActive={false}
               name="min"

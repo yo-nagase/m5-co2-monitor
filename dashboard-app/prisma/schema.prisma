@@ -8,10 +8,10 @@ datasource db {
 }
 
 model Reading {
-  id         Int     @id @default(autoincrement())
-  deviceId   String  @map("device_id")
+  id         Int      @id @default(autoincrement())
+  deviceId   String   @map("device_id")
   ppm        Int
-  recordedAt BigInt  @map("recorded_at")
+  recordedAt DateTime @map("recorded_at") @db.Timestamptz
   fw         String?
 
   @@index([deviceId, recordedAt(sort: Desc)], map: "idx_readings_device_time")
