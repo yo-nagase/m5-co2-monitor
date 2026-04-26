@@ -63,6 +63,7 @@ static void drawApiStatusIcon() {
 }
 
 void setup() {
+  Serial.begin(115200);
   auto cfg = M5.config();
   cfg.internal_imu = true;
   M5.begin(cfg);
