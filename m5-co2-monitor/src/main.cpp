@@ -4,6 +4,8 @@
 #include "page_wifi.h"
 #include "api_client.h"
 
+#include <WiFi.h>
+
 CRGB leds[LED_COUNT];
 M5Canvas canvas(&M5.Display);
 int screenW;
@@ -17,6 +19,48 @@ int currentPage = 0;
 const int GRAPH_MAX_POINTS = 60;
 int co2History[GRAPH_MAX_POINTS];
 int historyCount = 0;
+
+static const char* apiStatusName(ApiStatus s) {
+  switch (s) {
+    case API_STATUS_OK:      return "ok";
+    case API_STATUS_FAIL:    return "fail";
+    case API_STATUS_OFFLINE: return "offline";
+    default:                 return "idle";
+  }
+}
+
+static void heartbeatLog() {
+  static unsigned long nextHbMs = 0;
+  unsigned long now = millis();
+  if (now < nextHbMs) return;
+  nextHbMs = now + 10000;
+
+  bool connected = WiFi.status() == WL_CONNECTED;
+  Serial.printf("[hb] wifi=%s rssi=%d co2=%d q=%d status=%s\n",
+                connected ? "up" : "down",
+                connected ? WiFi.RSSI() : 0,
+                co2Value,
+                apiClientQueueSize(),
+                apiStatusName(apiClientStatus()));
+}
+
+static void drawApiStatusIcon() {
+  ApiStatus s = apiClientStatus();
+  if (s == API_STATUS_IDLE) return;
+
+  uint16_t color;
+  switch (s) {
+    case API_STATUS_OK:      color = TFT_GREEN;    break;
+    case API_STATUS_FAIL:    color = TFT_RED;      break;
+    case API_STATUS_OFFLINE: color = TFT_DARKGREY; break;
+    default:                 return;
+  }
+  const int x0 = screenW - 14;
+  const int yBase = 14;
+  canvas.fillRect(x0,     yBase - 4,  3, 4,  color);
+  canvas.fillRect(x0 + 4, yBase - 7,  3, 7,  color);
+  canvas.fillRect(x0 + 8, yBase - 10, 3, 10, color);
+}
 
 void setup() {
   auto cfg = M5.config();
@@ -54,6 +98,7 @@ void loop() {
   pageCO2Update();
   pageWifiUpdate();
   apiClientUpdate();
+  heartbeatLog();
 
   canvas.fillScreen(TFT_BLACK);
   switch (currentPage) {
@@ -61,6 +106,7 @@ void loop() {
     case 1: pageImuDraw();  break;
     case 2: pageWifiDraw(); break;
   }
+  drawApiStatusIcon();
   canvas.pushSprite(0, 0);
 
   delay(30);

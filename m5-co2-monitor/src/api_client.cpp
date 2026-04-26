@@ -26,6 +26,7 @@ static int count = 0;       // occupied slots
 static char deviceId[16] = {0};
 static unsigned long nextAttemptMs = 0;
 static int consecutiveFailures = 0;
+static ApiStatus lastStatus = API_STATUS_IDLE;
 
 static void enqueue(const Sample& s) {
   int tail = (head + count) % BUFFER_CAPACITY;
@@ -45,6 +46,12 @@ void apiClientInit() {
   count = 0;
   nextAttemptMs = 0;
   consecutiveFailures = 0;
+  lastStatus = API_STATUS_IDLE;
+}
+
+ApiStatus apiClientStatus() {
+  if (WiFi.status() != WL_CONNECTED) return API_STATUS_OFFLINE;
+  return lastStatus;
 }
 
 const char* apiClientDeviceId() {
@@ -122,9 +129,11 @@ void apiClientUpdate() {
     count -= n;  // pop n from the tail (LIFO)
     consecutiveFailures = 0;
     nextAttemptMs = 0;
+    lastStatus = API_STATUS_OK;
   } else {
     consecutiveFailures++;
     unsigned long backoff = (consecutiveFailures >= FAILURE_THRESHOLD) ? LONG_BACKOFF_MS : SHORT_BACKOFF_MS;
     nextAttemptMs = millis() + backoff;
+    lastStatus = API_STATUS_FAIL;
   }
 }
