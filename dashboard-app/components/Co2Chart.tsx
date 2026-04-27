@@ -11,6 +11,7 @@ import {
   Tooltip,
   ResponsiveContainer,
   ReferenceLine,
+  Brush,
 } from "recharts";
 import { RangeSelector } from "./RangeSelector";
 import type { Range } from "@/lib/schemas";
@@ -28,6 +29,8 @@ type ApiResponse = {
   bucketMs: number;
   points: Point[];
 };
+
+type BrushRange = { startIndex: number; endIndex: number };
 
 function formatTick(ms: number, range: Range): string {
   const d = new Date(ms);
@@ -48,6 +51,27 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
   const [range, setRange] = useState<Range>("6h");
   const [data, setData] = useState<Point[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [brushRange, setBrushRange] = useState<BrushRange | null>(null);
+  const sessionKey = `${deviceId}-${range}`;
+  const [prevSessionKey, setPrevSessionKey] = useState(sessionKey);
+  if (prevSessionKey !== sessionKey) {
+    setPrevSessionKey(sessionKey);
+    setBrushRange(null);
+  }
+
+  const points = data ?? [];
+  const lastIdx = Math.max(points.length - 1, 0);
+  const startIdx = brushRange ? Math.min(brushRange.startIndex, lastIdx) : 0;
+  const endIdx = brushRange ? Math.min(brushRange.endIndex, lastIdx) : lastIdx;
+  const focused = points.slice(startIdx, endIdx + 1);
+  const showNavigator = points.length > 1;
+  // Recharts resets the brush whenever the chart's `data` prop changes
+  // (chartDataSlice.setChartData clamps dataEndIndex to length-1). Pause
+  // polling while zoomed so the user's selection isn't clobbered.
+  const isZoomedIn =
+    brushRange !== null &&
+    points.length > 1 &&
+    (brushRange.startIndex > 0 || brushRange.endIndex < lastIdx);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,16 +97,18 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
     }
 
     fetchData();
-    if (!shouldAutoRefresh(range)) return () => {
-      cancelled = true;
-    };
+    if (!shouldAutoRefresh(range) || isZoomedIn) {
+      return () => {
+        cancelled = true;
+      };
+    }
 
     const interval = setInterval(fetchData, 10_000);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [deviceId, range]);
+  }, [deviceId, range, isZoomedIn]);
 
   return (
     <div>
@@ -95,7 +121,7 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
       </div>
       <div className="w-full">
         <ResponsiveContainer width="100%" aspect={2.5}>
-          <ComposedChart data={data ?? []} margin={{ top: 10, right: 20, bottom: 0, left: 0 }}>
+          <ComposedChart data={focused} margin={{ top: 10, right: 20, bottom: 0, left: 0 }}>
             <CartesianGrid stroke="currentColor" strokeOpacity={0.08} />
             <XAxis
               dataKey="t"
@@ -162,6 +188,41 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
           </ComposedChart>
         </ResponsiveContainer>
       </div>
+      {showNavigator && (
+        <div className="w-full mt-1">
+          <ResponsiveContainer width="100%" aspect={10}>
+            <ComposedChart
+              data={points}
+              margin={{ top: 4, right: 20, bottom: 0, left: 40 }}
+            >
+              <YAxis hide domain={[400, 2000]} />
+              <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} hide />
+              <Line
+                type="monotone"
+                dataKey="ppm_avg"
+                stroke="#10b981"
+                strokeOpacity={0.6}
+                strokeWidth={1}
+                dot={false}
+                isAnimationActive={false}
+              />
+              <Brush
+                key={`${deviceId}-${range}`}
+                dataKey="t"
+                height={28}
+                travellerWidth={8}
+                stroke="#10b981"
+                fill="rgba(24,24,27,0.4)"
+                alwaysShowText
+                tickFormatter={(v) => formatTick(Number(v), range)}
+                onChange={(r) => {
+                  setBrushRange({ startIndex: r.startIndex, endIndex: r.endIndex });
+                }}
+              />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      )}
     </div>
   );
 }
