@@ -21,9 +21,20 @@ export async function GET(req: Request) {
   }
 
   const { rangeMs, bucketMs } = RANGE_CONFIG[parsedRange.data];
-  const since = Date.now() - rangeMs;
 
-  const points = await aggregateReadings(device, bucketMs, since);
+  const endAtParam = url.searchParams.get("endAt");
+  const now = Date.now();
+  let endAt = now;
+  if (endAtParam !== null) {
+    const parsed = Number(endAtParam);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return NextResponse.json({ error: "invalid endAt" }, { status: 400 });
+    }
+    endAt = Math.min(parsed, now);
+  }
+  const since = endAt - rangeMs;
+
+  const points = await aggregateReadings(device, bucketMs, since, endAt);
   return NextResponse.json({
     device,
     range: parsedRange.data,

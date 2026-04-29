@@ -83,10 +83,12 @@ export async function listDevices(): Promise<DeviceRow[]> {
 export async function aggregateReadings(
   deviceId: string,
   bucketMs: number,
-  sinceMs: number
+  sinceMs: number,
+  untilMs?: number
 ): Promise<AggregatePoint[]> {
   const bucket = BigInt(bucketMs);
   const since = new Date(sinceMs);
+  const until = new Date(untilMs ?? Date.now());
   // Bucket timestamptz to ms-aligned epochs:
   //   floor(epoch_ms / bucket) * bucket → start-of-bucket in ms
   const rows = await prisma.$queryRaw<
@@ -97,7 +99,9 @@ export async function aggregateReadings(
            MIN(ppm) AS ppm_min,
            MAX(ppm) AS ppm_max
     FROM readings
-    WHERE device_id = ${deviceId} AND recorded_at >= ${since}
+    WHERE device_id = ${deviceId}
+      AND recorded_at >= ${since}
+      AND recorded_at <= ${until}
     GROUP BY t
     ORDER BY t ASC
     LIMIT 2000

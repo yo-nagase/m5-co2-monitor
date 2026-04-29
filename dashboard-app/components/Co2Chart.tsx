@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ComposedChart,
   Area,
@@ -15,6 +15,7 @@ import {
 } from "recharts";
 import { RangeSelector } from "./RangeSelector";
 import type { Range } from "@/lib/schemas";
+import { RANGE_CONFIG } from "@/lib/aggregate";
 
 type Point = {
   t: number;
@@ -52,11 +53,20 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
   const [data, setData] = useState<Point[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [brushRange, setBrushRange] = useState<BrushRange | null>(null);
-  const sessionKey = `${deviceId}-${range}`;
+  // null = "live" (window ends at now); a number anchors the window's right edge.
+  const [endAt, setEndAt] = useState<number | null>(null);
+  const sessionKey = `${deviceId}-${range}-${endAt ?? "live"}`;
   const [prevSessionKey, setPrevSessionKey] = useState(sessionKey);
   if (prevSessionKey !== sessionKey) {
     setPrevSessionKey(sessionKey);
     setBrushRange(null);
+  }
+  // Reset endAt when the device or range changes (separate from the brush reset).
+  const navKey = `${deviceId}-${range}`;
+  const [prevNavKey, setPrevNavKey] = useState(navKey);
+  if (prevNavKey !== navKey) {
+    setPrevNavKey(navKey);
+    setEndAt(null);
   }
 
   const points = data ?? [];
@@ -78,10 +88,11 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
 
     async function fetchData() {
       try {
-        const res = await fetch(
-          `/api/readings?device=${encodeURIComponent(deviceId)}&range=${range}`,
-          { cache: "no-store" }
-        );
+        const params = new URLSearchParams({ device: deviceId, range });
+        if (endAt !== null) params.set("endAt", String(endAt));
+        const res = await fetch(`/api/readings?${params.toString()}`, {
+          cache: "no-store",
+        });
         if (!res.ok) {
           setError(`HTTP ${res.status}`);
           return;
@@ -97,7 +108,8 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
     }
 
     fetchData();
-    if (!shouldAutoRefresh(range) || isZoomedIn) {
+    // Auto-refresh only in live mode and when not zoomed in.
+    if (!shouldAutoRefresh(range) || isZoomedIn || endAt !== null) {
       return () => {
         cancelled = true;
       };
@@ -108,18 +120,119 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [deviceId, range, isZoomedIn]);
+  }, [deviceId, range, isZoomedIn, endAt]);
+
+  function jumpToLive() {
+    setEndAt(null);
+  }
+
+  // Drag-to-pan on the focused chart. The transform is driven by direct DOM
+  // writes (not React state) during the drag — re-rendering Recharts on every
+  // pointermove causes the chart to freeze. State only updates on release.
+  const focusedRef = useRef<HTMLDivElement>(null);
+  const transformRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{
+    startX: number;
+    baselineEndAt: number;
+    width: number;
+    rafId: number | null;
+    pendingDx: number;
+  } | null>(null);
+  const endAtRef = useRef(endAt);
+  useEffect(() => {
+    endAtRef.current = endAt;
+  }, [endAt]);
+
+  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.button !== 0) return;
+    const el = focusedRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    dragRef.current = {
+      startX: e.clientX,
+      baselineEndAt: endAtRef.current ?? Date.now(),
+      width: rect.width,
+      rafId: null,
+      pendingDx: 0,
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    if (focusedRef.current) focusedRef.current.style.cursor = "grabbing";
+  }
+
+  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    drag.pendingDx = e.clientX - drag.startX;
+    if (drag.rafId !== null) return;
+    drag.rafId = requestAnimationFrame(() => {
+      if (!dragRef.current) return;
+      dragRef.current.rafId = null;
+      if (transformRef.current) {
+        transformRef.current.style.transform = `translateX(${dragRef.current.pendingDx}px)`;
+      }
+    });
+  }
+
+  function handlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    dragRef.current = null;
+    if (drag?.rafId !== null && drag?.rafId !== undefined) {
+      cancelAnimationFrame(drag.rafId);
+    }
+    if (transformRef.current) {
+      transformRef.current.style.transform = "";
+    }
+    if (focusedRef.current) focusedRef.current.style.cursor = "grab";
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    if (!drag) return;
+    const dx = e.clientX - drag.startX;
+    if (Math.abs(dx) <= 3) return; // treat as click, not pan
+    const rangeMs = RANGE_CONFIG[range].rangeMs;
+    // Drag right (positive dx) reveals older data → endAt decreases.
+    const deltaMs = -(dx / drag.width) * rangeMs;
+    const next = drag.baselineEndAt + deltaMs;
+    const now = Date.now();
+    setEndAt(next >= now ? null : next);
+  }
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
         <span className="text-sm text-zinc-500">
           {data ? `${data.length} points` : "…"}
           {error ? ` (${error})` : ""}
+          {endAt !== null && (
+            <span className="ml-2 rounded bg-amber-500/15 px-2 py-0.5 text-amber-500 font-mono text-xs">
+              ~{new Date(endAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
+            </span>
+          )}
         </span>
-        <RangeSelector value={range} onChange={setRange} />
+        <div className="flex items-center gap-2">
+          {endAt !== null && (
+            <button
+              type="button"
+              onClick={jumpToLive}
+              className="rounded-md bg-emerald-500/15 px-3 py-1 text-sm text-emerald-500 hover:bg-emerald-500/25"
+            >
+              Now
+            </button>
+          )}
+          <RangeSelector value={range} onChange={setRange} />
+        </div>
       </div>
-      <div className="w-full">
+      <div
+        ref={focusedRef}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        className="w-full select-none overflow-hidden"
+        style={{ cursor: "grab", touchAction: "pan-y" }}
+      >
+        <div ref={transformRef} style={{ willChange: "transform" }}>
         <ResponsiveContainer width="100%" aspect={2.5}>
           <ComposedChart data={focused} margin={{ top: 10, right: 20, bottom: 0, left: 0 }}>
             <CartesianGrid stroke="currentColor" strokeOpacity={0.08} />
@@ -187,6 +300,7 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
             />
           </ComposedChart>
         </ResponsiveContainer>
+        </div>
       </div>
       {showNavigator && (
         <div className="w-full mt-1">
