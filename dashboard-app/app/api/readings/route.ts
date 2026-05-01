@@ -32,7 +32,20 @@ export async function GET(req: Request) {
     }
     endAt = Math.min(parsed, now);
   }
-  const since = endAt - rangeMs;
+
+  // Optional extra past-time appended before `since` so the client can
+  // pre-fetch a wider buffer and pan smoothly without re-fetching on
+  // every release. Clamped so a single response can't exceed ~5x the range.
+  const extendMsParam = url.searchParams.get("extendMs");
+  let extendMs = 0;
+  if (extendMsParam !== null) {
+    const parsed = Number(extendMsParam);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return NextResponse.json({ error: "invalid extendMs" }, { status: 400 });
+    }
+    extendMs = Math.min(parsed, rangeMs * 4);
+  }
+  const since = endAt - rangeMs - extendMs;
 
   const points = await aggregateReadings(device, bucketMs, since, endAt);
   return NextResponse.json({
