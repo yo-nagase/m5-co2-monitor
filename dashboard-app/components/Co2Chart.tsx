@@ -80,6 +80,14 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
   // the buffer doesn't refetch. null = live (window ends at the latest point).
   const [windowEndAt, setWindowEndAt] = useState<number | null>(null);
 
+  // Mirrors the `windowEndAt` state into a ref so non-React callbacks (drag
+  // RAF, polling interval) can read the current value without re-running
+  // their owning effects.
+  const windowEndRef = useRef(windowEndAt);
+  useEffect(() => {
+    windowEndRef.current = windowEndAt;
+  }, [windowEndAt]);
+
   const rangeMs = RANGE_CONFIG[range].rangeMs;
 
   // Reset the visible window and the buffer anchor whenever the user changes
@@ -148,14 +156,23 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
     }
 
     fetchData();
-    // Auto-refresh only when in live mode (no past anchor pinned).
     if (!shouldAutoRefresh(range) || anchorEndAt !== null) {
       return () => {
         cancelled = true;
       };
     }
 
-    const interval = setInterval(fetchData, 10_000);
+    // Poll while the user is in pure live mode. We suspend the *individual
+    // poll* (rather than re-running this effect on every windowEndAt change)
+    // so a fast drag doesn't thrash the API: each pointermove already
+    // updates windowEndAt at 60 fps. Pausing matters because a refresh
+    // mutates the buffer and Recharts internally resets the Brush's
+    // end-index to the new last point (chartDataSlice.setChartData),
+    // flashing it to full width.
+    const interval = setInterval(() => {
+      if (windowEndRef.current !== null) return;
+      fetchData();
+    }, 10_000);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -182,10 +199,6 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
     rafId: number | null;
     pendingDx: number;
   } | null>(null);
-  const windowEndRef = useRef(windowEndAt);
-  useEffect(() => {
-    windowEndRef.current = windowEndAt;
-  }, [windowEndAt]);
   const anchorEndRef = useRef(anchorEndAt);
   useEffect(() => {
     anchorEndRef.current = anchorEndAt;
@@ -389,10 +402,13 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
                 isAnimationActive={false}
               />
               <Brush
-                // Re-keying when the buffer is re-fetched lets Recharts pick
-                // up the new startIndex/endIndex props (Recharts otherwise
-                // memoizes the brush handles past the first mount).
-                key={`${deviceId}-${range}-${anchorEndAt ?? "live"}-${points.length}`}
+                // Force a remount whenever the buffer's actual span shifts —
+                // Recharts otherwise resets dataEndIndex to data.length-1 on
+                // every data change, fighting our controlled startIndex/
+                // endIndex. Keying off (firstT, lastT) instead of just length
+                // catches re-anchors that happen to produce the same point
+                // count.
+                key={`${deviceId}-${range}-${points[0]?.t ?? 0}-${lastPointT ?? 0}`}
                 dataKey="t"
                 height={28}
                 travellerWidth={8}
