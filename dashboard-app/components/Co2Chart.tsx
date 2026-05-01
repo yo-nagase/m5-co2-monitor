@@ -31,7 +31,15 @@ type ApiResponse = {
   points: Point[];
 };
 
-type BrushRange = { startIndex: number; endIndex: number };
+// The fetched buffer covers BUFFER_FACTOR × rangeMs ending at the anchor.
+// Visible window is rangeMs wide, so the user can scroll up to
+// (BUFFER_FACTOR - 1) ranges into the past before we need to re-fetch.
+const BUFFER_FACTOR = 3;
+
+// Trigger a re-anchor (re-fetch with a new past anchor) once the visible
+// window's left edge approaches within REANCHOR_MARGIN of the buffer's left
+// edge. Half a range gives a visible cushion before another fetch is needed.
+const REANCHOR_MARGIN_RATIO = 0.5;
 
 function formatTick(ms: number, range: Range): string {
   const d = new Date(ms);
@@ -48,40 +56,79 @@ function shouldAutoRefresh(range: Range): boolean {
   return range === "1h" || range === "6h";
 }
 
+// Binary search: first index where pts[i].t >= target. Returns pts.length
+// when target is past the last point.
+function lowerBound(pts: Point[], target: number): number {
+  let lo = 0;
+  let hi = pts.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (pts[mid].t < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 export function Co2Chart({ deviceId }: { deviceId: string }) {
   const [range, setRange] = useState<Range>("6h");
   const [data, setData] = useState<Point[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [brushRange, setBrushRange] = useState<BrushRange | null>(null);
-  // null = "live" (window ends at now); a number anchors the window's right edge.
-  const [endAt, setEndAt] = useState<number | null>(null);
-  const sessionKey = `${deviceId}-${range}-${endAt ?? "live"}`;
-  const [prevSessionKey, setPrevSessionKey] = useState(sessionKey);
-  if (prevSessionKey !== sessionKey) {
-    setPrevSessionKey(sessionKey);
-    setBrushRange(null);
-  }
-  // Reset endAt when the device or range changes (separate from the brush reset).
+  // Buffer anchor: the right edge of the fetched buffer.
+  // null = live (anchor follows now via 10s polling).
+  const [anchorEndAt, setAnchorEndAt] = useState<number | null>(null);
+  // Visible window's right edge. Decoupled from the anchor so scrolling within
+  // the buffer doesn't refetch. null = live (window ends at the latest point).
+  const [windowEndAt, setWindowEndAt] = useState<number | null>(null);
+
+  // Mirrors the `windowEndAt` state into a ref so non-React callbacks (drag
+  // RAF, polling interval) can read the current value without re-running
+  // their owning effects.
+  const windowEndRef = useRef(windowEndAt);
+  useEffect(() => {
+    windowEndRef.current = windowEndAt;
+  }, [windowEndAt]);
+
+  const rangeMs = RANGE_CONFIG[range].rangeMs;
+
+  // Reset the visible window and the buffer anchor whenever the user changes
+  // device or range — the previous selection no longer makes sense.
   const navKey = `${deviceId}-${range}`;
   const [prevNavKey, setPrevNavKey] = useState(navKey);
   if (prevNavKey !== navKey) {
     setPrevNavKey(navKey);
-    setEndAt(null);
+    setAnchorEndAt(null);
+    setWindowEndAt(null);
   }
 
   const points = data ?? [];
   const lastIdx = Math.max(points.length - 1, 0);
-  const startIdx = brushRange ? Math.min(brushRange.startIndex, lastIdx) : 0;
-  const endIdx = brushRange ? Math.min(brushRange.endIndex, lastIdx) : lastIdx;
-  const focused = points.slice(startIdx, endIdx + 1);
+  const lastPointT = points.length > 0 ? points[lastIdx].t : null;
   const showNavigator = points.length > 1;
-  // Recharts resets the brush whenever the chart's `data` prop changes
-  // (chartDataSlice.setChartData clamps dataEndIndex to length-1). Pause
-  // polling while zoomed so the user's selection isn't clobbered.
-  const isZoomedIn =
-    brushRange !== null &&
-    points.length > 1 &&
-    (brushRange.startIndex > 0 || brushRange.endIndex < lastIdx);
+
+  // The visible window — this is what the top chart shows. In live mode
+  // (windowEndAt === null) it tracks the most recent data point, which keeps
+  // this pure (no `Date.now()` during render) and on a live chart the latest
+  // point is essentially "now" anyway.
+  const effectiveWindowEnd = windowEndAt ?? lastPointT;
+  const visibleDomain: [number, number] | undefined =
+    effectiveWindowEnd === null
+      ? undefined
+      : [effectiveWindowEnd - rangeMs, effectiveWindowEnd];
+
+  // Brush indices that mirror the visible window in the buffer. The Brush is
+  // controlled (driven by these props) so the navigator always reflects what
+  // the top chart is showing — drag the brush body and the top scrolls;
+  // scroll the top chart and the brush slides to match.
+  let brushStart: number | undefined;
+  let brushEnd: number | undefined;
+  if (effectiveWindowEnd !== null && points.length > 1) {
+    const startTime = effectiveWindowEnd - rangeMs;
+    const sIdx = lowerBound(points, startTime);
+    // Last index where points[i].t <= effectiveWindowEnd.
+    const eIdx = Math.max(0, lowerBound(points, effectiveWindowEnd + 1) - 1);
+    brushStart = Math.max(0, Math.min(sIdx, lastIdx));
+    brushEnd = Math.max(brushStart, Math.min(eIdx, lastIdx));
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -89,7 +136,8 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
     async function fetchData() {
       try {
         const params = new URLSearchParams({ device: deviceId, range });
-        if (endAt !== null) params.set("endAt", String(endAt));
+        if (anchorEndAt !== null) params.set("endAt", String(anchorEndAt));
+        params.set("extendMs", String((BUFFER_FACTOR - 1) * rangeMs));
         const res = await fetch(`/api/readings?${params.toString()}`, {
           cache: "no-store",
         });
@@ -108,40 +156,57 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
     }
 
     fetchData();
-    // Auto-refresh only in live mode and when not zoomed in.
-    if (!shouldAutoRefresh(range) || isZoomedIn || endAt !== null) {
+    if (!shouldAutoRefresh(range) || anchorEndAt !== null) {
       return () => {
         cancelled = true;
       };
     }
 
-    const interval = setInterval(fetchData, 10_000);
+    // Poll while the user is in pure live mode. We suspend the *individual
+    // poll* (rather than re-running this effect on every windowEndAt change)
+    // so a fast drag doesn't thrash the API: each pointermove already
+    // updates windowEndAt at 60 fps. Pausing matters because a refresh
+    // mutates the buffer and Recharts internally resets the Brush's
+    // end-index to the new last point (chartDataSlice.setChartData),
+    // flashing it to full width.
+    const interval = setInterval(() => {
+      if (windowEndRef.current !== null) return;
+      fetchData();
+    }, 10_000);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [deviceId, range, isZoomedIn, endAt]);
+  }, [deviceId, range, anchorEndAt, rangeMs]);
 
   function jumpToLive() {
-    setEndAt(null);
+    setAnchorEndAt(null);
+    setWindowEndAt(null);
   }
 
-  // Drag-to-pan on the focused chart. The transform is driven by direct DOM
-  // writes (not React state) during the drag — re-rendering Recharts on every
-  // pointermove causes the chart to freeze. State only updates on release.
+  // Drag-to-pan. We update the chart's XAxis domain via state (RAF-throttled)
+  // so panning slides only the data — gridlines, Y axis, and horizontal
+  // reference lines stay put as the user expects. The previous CSS-transform
+  // approach moved the entire chart, including the grid, which felt wrong.
+  // Re-rendering Recharts at 60 fps was the original concern, but the data
+  // prop is now stable (the buffer doesn't change during the drag), so only
+  // the domain mapping recomputes per frame — that's cheap.
   const focusedRef = useRef<HTMLDivElement>(null);
-  const transformRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
     startX: number;
-    baselineEndAt: number;
+    baselineWindowEnd: number;
     width: number;
     rafId: number | null;
     pendingDx: number;
   } | null>(null);
-  const endAtRef = useRef(endAt);
+  const anchorEndRef = useRef(anchorEndAt);
   useEffect(() => {
-    endAtRef.current = endAt;
-  }, [endAt]);
+    anchorEndRef.current = anchorEndAt;
+  }, [anchorEndAt]);
+  const rangeMsRef = useRef(rangeMs);
+  useEffect(() => {
+    rangeMsRef.current = rangeMs;
+  }, [rangeMs]);
 
   function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
     if (e.button !== 0) return;
@@ -151,7 +216,7 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
     if (rect.width <= 0) return;
     dragRef.current = {
       startX: e.clientX,
-      baselineEndAt: endAtRef.current ?? Date.now(),
+      baselineWindowEnd: windowEndRef.current ?? Date.now(),
       width: rect.width,
       rafId: null,
       pendingDx: 0,
@@ -166,11 +231,12 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
     drag.pendingDx = e.clientX - drag.startX;
     if (drag.rafId !== null) return;
     drag.rafId = requestAnimationFrame(() => {
-      if (!dragRef.current) return;
-      dragRef.current.rafId = null;
-      if (transformRef.current) {
-        transformRef.current.style.transform = `translateX(${dragRef.current.pendingDx}px)`;
-      }
+      const d = dragRef.current;
+      if (!d) return;
+      d.rafId = null;
+      // Drag right (positive dx) reveals older data → window end decreases.
+      const deltaMs = -(d.pendingDx / d.width) * rangeMsRef.current;
+      setWindowEndAt(d.baselineWindowEnd + deltaMs);
     });
   }
 
@@ -180,9 +246,6 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
     if (drag?.rafId !== null && drag?.rafId !== undefined) {
       cancelAnimationFrame(drag.rafId);
     }
-    if (transformRef.current) {
-      transformRef.current.style.transform = "";
-    }
     if (focusedRef.current) focusedRef.current.style.cursor = "grab";
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
@@ -190,12 +253,31 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
     if (!drag) return;
     const dx = e.clientX - drag.startX;
     if (Math.abs(dx) <= 3) return; // treat as click, not pan
-    const rangeMs = RANGE_CONFIG[range].rangeMs;
-    // Drag right (positive dx) reveals older data → endAt decreases.
     const deltaMs = -(dx / drag.width) * rangeMs;
-    const next = drag.baselineEndAt + deltaMs;
+    const candidate = drag.baselineWindowEnd + deltaMs;
+    commitWindowEnd(candidate);
+    // windowEndAt is already at `candidate` from the last RAF in pointermove.
+  }
+
+  // Resolve a freshly chosen window-end into the right (anchor, window) pair.
+  // Used by both drag-release and brush onChange so the two stay consistent.
+  function commitWindowEnd(candidate: number) {
     const now = Date.now();
-    setEndAt(next >= now ? null : next);
+    if (candidate >= now) {
+      // Back at or past "now" — drop the anchor so polling resumes.
+      setAnchorEndAt(null);
+      setWindowEndAt(null);
+      return;
+    }
+    setWindowEndAt(candidate);
+    // Re-anchor (refetch a wider buffer centered on the new position) only
+    // when the visible window has run within REANCHOR_MARGIN of the buffer's
+    // left edge. Buffer covers [anchor - BUFFER_FACTOR*rangeMs, anchor].
+    const currentAnchor = anchorEndRef.current ?? now;
+    const bufferStart = currentAnchor - BUFFER_FACTOR * rangeMs;
+    const visibleStart = candidate - rangeMs;
+    const margin = REANCHOR_MARGIN_RATIO * rangeMs;
+    if (visibleStart < bufferStart + margin) setAnchorEndAt(candidate);
   }
 
   return (
@@ -204,14 +286,14 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
         <span className="text-sm text-zinc-500">
           {data ? `${data.length} points` : "…"}
           {error ? ` (${error})` : ""}
-          {endAt !== null && (
+          {windowEndAt !== null && (
             <span className="ml-2 rounded bg-amber-500/15 px-2 py-0.5 text-amber-500 font-mono text-xs">
-              ~{new Date(endAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
+              ~{new Date(windowEndAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
             </span>
           )}
         </span>
         <div className="flex items-center gap-2">
-          {endAt !== null && (
+          {windowEndAt !== null && (
             <button
               type="button"
               onClick={jumpToLive}
@@ -232,14 +314,14 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
         className="w-full select-none overflow-hidden"
         style={{ cursor: "grab", touchAction: "pan-y" }}
       >
-        <div ref={transformRef} style={{ willChange: "transform" }}>
         <ResponsiveContainer width="100%" aspect={2.5}>
-          <ComposedChart data={focused} margin={{ top: 10, right: 20, bottom: 0, left: 0 }}>
+          <ComposedChart data={points} margin={{ top: 10, right: 20, bottom: 0, left: 0 }}>
             <CartesianGrid stroke="currentColor" strokeOpacity={0.08} />
             <XAxis
               dataKey="t"
               type="number"
-              domain={["dataMin", "dataMax"]}
+              domain={visibleDomain ?? ["dataMin", "dataMax"]}
+              allowDataOverflow
               tickFormatter={(v: number) => formatTick(v, range)}
               stroke="currentColor"
               strokeOpacity={0.4}
@@ -300,7 +382,6 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
             />
           </ComposedChart>
         </ResponsiveContainer>
-        </div>
       </div>
       {showNavigator && (
         <div className="w-full mt-1">
@@ -321,7 +402,13 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
                 isAnimationActive={false}
               />
               <Brush
-                key={`${deviceId}-${range}`}
+                // Force a remount whenever the buffer's actual span shifts —
+                // Recharts otherwise resets dataEndIndex to data.length-1 on
+                // every data change, fighting our controlled startIndex/
+                // endIndex. Keying off (firstT, lastT) instead of just length
+                // catches re-anchors that happen to produce the same point
+                // count.
+                key={`${deviceId}-${range}-${points[0]?.t ?? 0}-${lastPointT ?? 0}`}
                 dataKey="t"
                 height={28}
                 travellerWidth={8}
@@ -329,8 +416,22 @@ export function Co2Chart({ deviceId }: { deviceId: string }) {
                 fill="rgba(24,24,27,0.4)"
                 alwaysShowText
                 tickFormatter={(v) => formatTick(Number(v), range)}
+                startIndex={brushStart}
+                endIndex={brushEnd}
                 onChange={(r) => {
-                  setBrushRange({ startIndex: r.startIndex, endIndex: r.endIndex });
+                  if (
+                    r.startIndex === undefined ||
+                    r.endIndex === undefined ||
+                    points.length === 0
+                  ) {
+                    return;
+                  }
+                  // The right-most index of the selection drives the visible
+                  // window. We always show rangeMs of data ending there;
+                  // resizing the brush therefore acts like a scroll, not a
+                  // zoom — matching the user's mental model.
+                  const idx = Math.max(0, Math.min(r.endIndex, lastIdx));
+                  commitWindowEnd(points[idx].t);
                 }}
               />
             </ComposedChart>
